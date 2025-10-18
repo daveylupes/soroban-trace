@@ -1,0 +1,47 @@
+# Source files (we publish compiled dist/)
+src/
+test/
+tsconfig.json
+
+# Development files
+.gitignore
+.git/
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Documentation (except essential ones)
+docs/
+CURRENT_STATUS.md
+PROJECT_STATUS.md
+FIXED.md
+TEST_SUCCESS.md
+TESTING.md
+DEPLOY_TEST_CONTRACT.md
+FIND_SOROBAN_TXS.md
+KNOWN_ISSUES.md
+ARCHITECTURE.md
+
+# Development scripts
+scripts/
+test.sh
+
+# Logs and temp files
+*.log
+*.pid
+coverage/
+.nyc_output/
+
+# Environment
+.env
+.env.*
+
+# Examples (optional: include if helpful)
+# examples/
+
+# Build artifacts
+*.tgz
+node_modules/
+
