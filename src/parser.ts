@@ -10,9 +10,7 @@ import {
 import { 
   TransactionTrace, 
   TraceCall, 
-  TraceEvent, 
-  StorageWrite, 
-  StorageRead 
+  TraceEvent
 } from './types';
 
 export class SorobanParser {
@@ -326,7 +324,7 @@ export class SorobanParser {
     });
   }
 
-  private parseOperationMeta(opMeta: any, trace: TransactionTrace): void {
+  private parseOperationMeta(opMeta: any, _trace: TransactionTrace): void {
     try {
       const changes = opMeta.changes?.() || [];
       
