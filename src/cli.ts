@@ -55,11 +55,11 @@ program
   .option('-j, --json', 'Output as JSON')
   .option('-v, --verbose', 'Verbose output with additional details')
   .option('--no-colors', 'Disable colored output')
-  .action((filePath, options) => {
+  .action(async (filePath, options) => {
     try {
       const tracer = new SorobanTrace();
 
-      const result = tracer.traceFromFile(filePath, {
+      const result = await tracer.traceFromFile(filePath, {
         json: options.json,
         verbose: options.verbose,
         colors: options.colors,

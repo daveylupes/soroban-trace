@@ -2,18 +2,34 @@
 
 Current limitations and workarounds for soroban-trace.
 
-## Missing Contract Names
+## WASM Spec Only for Upload Transactions
 
-**Issue:** Functions show as generic names like `invoke` instead of actual contract function names.
+**Issue:** The decoded contract interface (function signatures with argument
+names/types) is only shown when the traced transaction *uploads* contract code
+(an `uploadContractWasm` host function).
 
-**Cause:** The tool doesn't yet parse WASM metadata to extract function names and ABIs.
+**Cause:** For a plain `invokeContract` transaction, resolving the spec means
+fetching the contract's WASM by hash from the network. That extra RPC round-trip
+is intentionally deferred.
 
 **Current Behavior:**
-- Shows operation index
-- Shows raw parameters (decoded when possible)
-- Shows events and return values
+- `invokeContract` transactions show the real contract ID, function name, and
+  decoded arguments (from the envelope) — but not the full typed spec
+- `uploadContractWasm` transactions additionally show the `CONTRACT WASM`
+  section: function list, argument names/types, and build metadata
 
-**Future Enhancement:** Planned for Phase 2 - WASM metadata extraction
+**Future Enhancement:** Resolve the spec for any invoked contract ID via
+`getLedgerEntries`.
+
+---
+
+## Partial Storage Change Extraction
+
+**Issue:** `WRITE:` / `READ:` storage lines are rarely populated.
+
+**Cause:** `parseOperationMeta` does not yet walk `LedgerEntryChanges` in the
+operation meta to reconstruct contract-data reads and writes. Footprint entry
+*counts* are reported in the `RESOURCE USAGE` section.
 
 ---
 

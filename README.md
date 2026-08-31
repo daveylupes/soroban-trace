@@ -71,14 +71,20 @@ See [QUICKSTART.md](QUICKSTART.md) for a complete guide.
 │ Status: SUCCESS                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
 │ OPERATIONS:                                                          │
-│   1. CALL: invoke()                                                  │
-│      ◆ EVENT: Transfer                                               │
-│        Data: { from: alice, to: bob, amount: 1000 }                  │
-│      → success                                                       │
+│   1. CALL: transfer(GBZXN7…, GA7QYN…, 1000)                          │
+│      Contract: CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2H…   │
+│      ◆ EVENT: transfer                                               │
+│      → true                                                          │
 ├──────────────────────────────────────────────────────────────────────┤
 │ EVENTS:                                                              │
-│   ◆ EVENT: Transfer                                                  │
-│     Data: { from: alice, to: bob, amount: 1000 }                     │
+│   ◆ EVENT: transfer                                                  │
+│     Data: 1000                                                       │
+├──────────────────────────────────────────────────────────────────────┤
+│ RESOURCE USAGE:                                                      │
+│   CPU instructions       3,214,876                                   │
+│   Disk read bytes        4,920                                       │
+│   Resource fee           0.1043216 XLM                               │
+│   Inclusion fee          0.0056784 XLM                               │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -147,10 +153,16 @@ console.log(fileResult);
 | Phase | Feature | Status |
 |-------|---------|--------|
 | **Phase 1** | CLI MVP with transaction tracing | Complete |
-| **Phase 2** | WASM metadata parsing, gas analytics | Planned |
+| **Phase 2** | Function/argument decoding, gas analytics, WASM metadata | In progress |
 | **Phase 3** | Web UI for visualization | Planned |
 | **Phase 4** | VSCode extension integration | Planned |
 | **Phase 5** | Live tracing during tests | Planned |
+
+Phase 2 delivered in v0.2.0: transaction-envelope decoding (real contract IDs,
+function names, decoded arguments), a `RESOURCE USAGE` section with CPU
+instructions / IO bytes / fee breakdown, and WASM spec + build-metadata
+extraction for contract-upload transactions. Still to come: resolving the WASM
+spec for any invoked contract by ID, and full storage read/write extraction.
 
 ---
 

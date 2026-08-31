@@ -1,8 +1,8 @@
 /**
  * Integration tests for soroban-trace
- * 
- * Tests end-to-end functionality with real testnet data
- * 
+ *
+ * Tests end-to-end functionality against the bundled sample transaction.
+ *
  * Run with: npm run test:integration
  */
 
@@ -16,41 +16,47 @@ describe('Integration Tests', () => {
   });
 
   describe('End-to-end tracing', () => {
-    it('should trace from file', () => {
-      const result = tracer.traceFromFile('./examples/sample-transaction.json', {
-        json: false,
-        verbose: false,
-        colors: false,
-      });
-
-      expect(result).toBeDefined();
-      expect(typeof result).toBe('string');
-    });
-
-    it('should handle invalid file paths', () => {
-      expect(() => {
-        tracer.traceFromFile('./nonexistent.json');
-      }).toThrow();
-    });
-
-    // Note: This test requires a real transaction hash
-    it.skip('should trace real testnet transaction', async () => {
-      const TX_HASH = process.env.TEST_TX_HASH;
-      
-      if (!TX_HASH) {
-        console.log('Skipping: Set TEST_TX_HASH environment variable to run this test');
-        return;
-      }
-
-      const result = await tracer.traceTransaction(TX_HASH, {
+    it('should trace from the bundled sample file', async () => {
+      const result = await tracer.traceFromFile('./examples/sample-transaction.json', {
         json: false,
         verbose: true,
         colors: false,
       });
 
-      expect(result).toBeDefined();
+      expect(typeof result).toBe('string');
+      expect(result).toContain('transfer');
+      expect(result).toContain('RESOURCE USAGE');
+      expect(result).toContain('CPU instructions');
+    });
+
+    it('should emit valid JSON with decoded call data', async () => {
+      const result = await tracer.traceFromFile('./examples/sample-transaction.json', {
+        json: true,
+        colors: false,
+      });
+
+      const parsed = JSON.parse(result);
+      expect(parsed.success).toBe(true);
+      expect(parsed.operations[0].functionName).toBe('transfer');
+      expect(parsed.operations[0].parameters).toHaveLength(3);
+      expect(parsed.gas.cpuInstructions).toBeGreaterThan(0);
+      // BigInt values must be serialized as strings, not crash JSON.stringify.
+      expect(typeof parsed.gas.totalResourceFeeStroops).toBe('string');
+    });
+
+    it('should reject invalid file paths', async () => {
+      await expect(tracer.traceFromFile('./nonexistent.json')).rejects.toThrow();
+    });
+
+    it.skip('should trace real testnet transaction', async () => {
+      const TX_HASH = process.env.TEST_TX_HASH;
+      if (!TX_HASH) return;
+
+      const result = await tracer.traceTransaction(TX_HASH, {
+        verbose: true,
+        colors: false,
+      });
       expect(result).toContain(TX_HASH);
     });
   });
 });
-
