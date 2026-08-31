@@ -2,16 +2,46 @@
  * Parser for Soroban transaction data
  */
 
-import { 
-  xdr, 
-  scValToNative, 
-  Address 
+import {
+  xdr,
+  scValToNative,
+  Address,
+  StrKey
 } from '@stellar/stellar-sdk';
-import { 
-  TransactionTrace, 
-  TraceCall, 
-  TraceEvent
+import {
+  TransactionTrace,
+  TraceCall,
+  TraceEvent,
+  GasAnalytics
 } from './types';
+
+/** Coerce an XDR Int64/Uint64/number-ish value to a decimal string. */
+function bigIntString(value: any): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  try {
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'number') return Math.trunc(value).toString();
+    // xdr Hyper/UnsignedHyper and similar expose toBigInt()/toString()
+    if (typeof value.toBigInt === 'function') return value.toBigInt().toString();
+    if (typeof value.toString === 'function') return value.toString();
+  } catch {
+    /* fall through */
+  }
+  return undefined;
+}
+
+/** Coerce an XDR Uint32/number to a plain number. */
+function toNumber(value: any): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'number') return value;
+  try {
+    if (typeof value.toBigInt === 'function') return Number(value.toBigInt());
+    const n = Number(value.toString());
+    return Number.isNaN(n) ? undefined : n;
+  } catch {
+    return undefined;
+  }
+}
 
 export class SorobanParser {
   /**
@@ -33,33 +63,52 @@ export class SorobanParser {
       trace.createdAt = txData.created_at || txData.createdAt;
     }
 
+    // Normalize the XDR fields across Horizon (snake_case) and RPC (camelCase).
+    const envelopeXdr = txData.envelopeXdr || txData.envelope_xdr;
+    const resultXdr = txData.resultXdr || txData.result_xdr || txData.result;
+    const metaXdr = txData.resultMetaXdr || txData.result_meta_xdr;
+
     try {
-      // Parse from Horizon format
-      if (txData.result_xdr || txData.result) {
-        this.parseFromHorizon(txData, trace);
+      // 1. Envelope: real contract IDs, function names, decoded args, and the
+      //    declared Soroban resources / resource-fee ceiling.
+      if (envelopeXdr) {
+        this.parseEnvelope(envelopeXdr, trace);
       }
-      // Parse from RPC format (check for envelope XDR as well)
-      else if (txData.resultXdr || txData.resultMetaXdr || txData.envelopeXdr) {
-        this.parseFromRPC(txData, trace);
+
+      // 2. Result XDR: per-operation success/failure and the total fee charged.
+      if (resultXdr) {
+        this.parseResultXdr(resultXdr, trace);
       }
-      // New RPC format with direct events
-      else if (txData.events !== undefined) {
-        if (Array.isArray(txData.events) && txData.events.length > 0) {
-          console.log(`Found ${txData.events.length} events`);
-          this.parseDirectRPCFormat(txData, trace);
-        } else {
-          // Events is present but empty or not an array
-          console.log('Note: This transaction has no Soroban events (it may not be a contract invocation)');
-        }
+
+      // 3. Meta XDR: events, return values, and the charged resource-fee breakdown.
+      if (metaXdr) {
+        this.parseMetaXdr(metaXdr, trace);
       }
-      // Direct XDR provided
-      else if (txData.xdr) {
+
+      // 4. Newer RPC shape: base64 ContractEvent XDR strings directly on the response.
+      if (!metaXdr && Array.isArray(txData.events) && txData.events.length > 0) {
+        console.log(`Found ${txData.events.length} events`);
+        this.parseDirectRPCFormat(txData, trace);
+      }
+
+      // 5. A bare XDR blob with no known wrapper.
+      if (!envelopeXdr && !resultXdr && !metaXdr && txData.xdr) {
         this.parseXDR(txData.xdr, trace);
-      } else {
-        // Log what we received to help debug
+      }
+
+      // 6. Nothing recognized.
+      if (
+        !envelopeXdr &&
+        !resultXdr &&
+        !metaXdr &&
+        !txData.xdr &&
+        !Array.isArray(txData.events)
+      ) {
         console.log('Transaction data keys:', Object.keys(txData));
         console.log('Unable to parse transaction data - no recognized format found');
       }
+
+      this.finalizeGas(trace);
     } catch (error) {
       trace.success = false;
       trace.errorMessage = error instanceof Error ? error.message : String(error);
@@ -75,73 +124,272 @@ export class SorobanParser {
     return true; // default optimistic
   }
 
-  private parseFromHorizon(txData: any, trace: TransactionTrace): void {
-    // Parse result XDR
-    const resultXdr = txData.result_xdr || txData.result;
-    if (resultXdr) {
-      try {
-        const txResult = xdr.TransactionResult.fromXDR(resultXdr, 'base64');
-        
-        // Extract operation results
-        if (txResult.result()?.results()) {
-          const opResults = txResult.result().results();
-          opResults.forEach((opResult: any, index: number) => {
-            const call = this.parseOperationResult(opResult, index);
-            if (call) {
-              trace.operations.push(call);
-            }
-          });
-        }
-      } catch (error) {
-        console.error('Error parsing result XDR:', error);
+  /**
+   * Decode the transaction envelope: real contract IDs, invoked function
+   * names, decoded arguments, the nested-call tree (from auth entries), and
+   * the declared Soroban resources / resource-fee ceiling.
+   */
+  private parseEnvelope(envelopeXdr: string, trace: TransactionTrace): void {
+    let tx: any;
+    try {
+      const env = xdr.TransactionEnvelope.fromXDR(envelopeXdr, 'base64');
+      switch (env.switch().name) {
+        case 'envelopeTypeTxV0':
+          tx = env.v0().tx();
+          break;
+        case 'envelopeTypeTx':
+          tx = env.v1().tx();
+          break;
+        case 'envelopeTypeTxFeeBump':
+          // Unwrap the fee-bump wrapper to the inner v1 transaction.
+          tx = env.feeBump().tx().innerTx().v1().tx();
+          break;
+        default:
+          return;
       }
+    } catch (error) {
+      console.error('Error parsing envelope XDR:', error);
+      return;
     }
 
-    // Parse meta XDR for events and storage changes
-    const metaXdr = txData.result_meta_xdr || txData.resultMetaXdr;
-    if (metaXdr) {
+    const operations: any[] = tx.operations?.() || [];
+    operations.forEach((op: any, index: number) => {
       try {
-        const txMeta = xdr.TransactionMeta.fromXDR(metaXdr, 'base64');
-        this.parseTransactionMeta(txMeta, trace);
+        const body = op.body();
+        if (body.switch().name !== 'invokeHostFunction') return;
+
+        const invokeOp = body.invokeHostFunctionOp();
+        const call = this.parseHostFunction(invokeOp.hostFunction(), index, trace);
+        if (!call) return;
+
+        // Nested calls come from the authorized-invocation tree.
+        const auth: any[] = invokeOp.auth?.() || [];
+        auth.forEach((entry: any) => {
+          const nested = this.parseAuthorizedInvocation(entry.rootInvocation());
+          if (nested) call.nestedCalls.push(nested);
+        });
+
+        trace.operations[index] = call;
       } catch (error) {
-        console.error('Error parsing meta XDR:', error);
+        console.error('Error parsing envelope operation:', error);
+      }
+    });
+
+    // Declared Soroban resources live in the transaction ext (sorobanData).
+    try {
+      const ext = tx.ext?.();
+      if (ext && ext.switch() === 1) {
+        const sorobanData = ext.sorobanData();
+        const resources = sorobanData.resources();
+        const footprint = resources.footprint();
+        const gas: GasAnalytics = trace.gas || {};
+        gas.cpuInstructions = toNumber(resources.instructions());
+        gas.diskReadBytes = toNumber(resources.diskReadBytes());
+        gas.writeBytes = toNumber(resources.writeBytes());
+        gas.readonlyFootprintEntries = footprint.readOnly()?.length ?? 0;
+        gas.readwriteFootprintEntries = footprint.readWrite()?.length ?? 0;
+        gas.declaredResourceFeeStroops = bigIntString(sorobanData.resourceFee());
+        trace.gas = gas;
+      }
+    } catch (error) {
+      console.error('Error parsing Soroban transaction data:', error);
+    }
+  }
+
+  private parseHostFunction(
+    hf: any,
+    index: number,
+    trace: TransactionTrace
+  ): TraceCall | null {
+    const base: TraceCall = {
+      type: 'call',
+      contractId: `operation_${index}`,
+      functionName: 'invoke',
+      parameters: [],
+      events: [],
+      storageWrites: [],
+      storageReads: [],
+      nestedCalls: [],
+    };
+
+    switch (hf.switch().name) {
+      case 'hostFunctionTypeInvokeContract': {
+        const ic = hf.invokeContract();
+        base.type = 'call';
+        base.contractId = this.scAddressToString(ic.contractAddress());
+        base.functionName = ic.functionName().toString();
+        base.parameters = (ic.args() || []).map((a: any) => this.decodeScVal(a));
+        return base;
+      }
+      case 'hostFunctionTypeCreateContract':
+      case 'hostFunctionTypeCreateContractV2': {
+        const args =
+          hf.switch().name === 'hostFunctionTypeCreateContractV2'
+            ? hf.createContractV2()
+            : hf.createContract();
+        base.type = 'create';
+        base.functionName = 'create_contract';
+        base.wasmHash = this.executableWasmHash(args.executable());
+        if (typeof args.constructorArgs === 'function') {
+          base.parameters = (args.constructorArgs() || []).map((a: any) =>
+            this.decodeScVal(a)
+          );
+        }
+        return base;
+      }
+      case 'hostFunctionTypeUploadContractWasm': {
+        const wasm: Buffer = hf.wasm();
+        base.type = 'upload';
+        base.functionName = 'upload_wasm';
+        trace._pendingWasm = wasm;
+        return base;
+      }
+      default:
+        return base;
+    }
+  }
+
+  /** Recursively turn a SorobanAuthorizedInvocation into a TraceCall tree. */
+  private parseAuthorizedInvocation(invocation: any): TraceCall | null {
+    if (!invocation) return null;
+    try {
+      const fn = invocation.function();
+      const call: TraceCall = {
+        type: 'call',
+        contractId: 'unknown',
+        functionName: 'invoke',
+        parameters: [],
+        events: [],
+        storageWrites: [],
+        storageReads: [],
+        nestedCalls: [],
+      };
+
+      switch (fn.switch().name) {
+        case 'sorobanAuthorizedFunctionTypeContractFn': {
+          const cf = fn.contractFn();
+          call.contractId = this.scAddressToString(cf.contractAddress());
+          call.functionName = cf.functionName().toString();
+          call.parameters = (cf.args() || []).map((a: any) => this.decodeScVal(a));
+          break;
+        }
+        case 'sorobanAuthorizedFunctionTypeCreateContractHostFn':
+        case 'sorobanAuthorizedFunctionTypeCreateContractV2HostFn':
+          call.type = 'create';
+          call.functionName = 'create_contract';
+          break;
+      }
+
+      const subs: any[] = invocation.subInvocations?.() || [];
+      subs.forEach((sub: any) => {
+        const child = this.parseAuthorizedInvocation(sub);
+        if (child) call.nestedCalls.push(child);
+      });
+
+      return call;
+    } catch (error) {
+      console.error('Error parsing authorized invocation:', error);
+      return null;
+    }
+  }
+
+  private parseResultXdr(resultXdr: string, trace: TransactionTrace): void {
+    try {
+      const txResult = xdr.TransactionResult.fromXDR(resultXdr, 'base64');
+
+      const feeCharged = bigIntString(txResult.feeCharged());
+      if (feeCharged) {
+        trace.gas = trace.gas || {};
+        trace.gas.totalFeeChargedStroops = feeCharged;
+      }
+
+      const inner = txResult.result();
+      const resultName: string = inner?.switch()?.name || '';
+      if (/failed/i.test(resultName)) {
+        trace.success = false;
+      }
+
+      const opResults = inner?.results?.();
+      if (Array.isArray(opResults)) {
+        opResults.forEach((opResult: any, index: number) => {
+          const parsed = this.parseOperationResult(opResult, index);
+          if (!parsed) return;
+          const existing = trace.operations[index];
+          if (existing) {
+            if (parsed.error) existing.error = parsed.error;
+            if (parsed.returnValue !== undefined && existing.returnValue === undefined) {
+              existing.returnValue = parsed.returnValue;
+            }
+          } else {
+            trace.operations[index] = parsed;
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error parsing result XDR:', error);
+    }
+  }
+
+  private parseMetaXdr(metaXdr: string, trace: TransactionTrace): void {
+    try {
+      const txMeta = xdr.TransactionMeta.fromXDR(metaXdr, 'base64');
+      this.parseTransactionMeta(txMeta, trace);
+    } catch (error) {
+      console.error('Error parsing meta XDR:', error);
+      // Partial parsing is fine - we may already have useful data.
+    }
+  }
+
+  /** Fill in derived gas fields once every source has been parsed. */
+  private finalizeGas(trace: TransactionTrace): void {
+    const gas = trace.gas;
+    if (!gas) return;
+
+    try {
+      const nonRefundable = gas.nonRefundableFeeStroops
+        ? BigInt(gas.nonRefundableFeeStroops)
+        : undefined;
+      const refundable = gas.refundableFeeStroops
+        ? BigInt(gas.refundableFeeStroops)
+        : undefined;
+      if (nonRefundable !== undefined || refundable !== undefined) {
+        gas.totalResourceFeeStroops = (
+          (nonRefundable ?? 0n) + (refundable ?? 0n)
+        ).toString();
+      }
+
+      if (gas.totalFeeChargedStroops && gas.totalResourceFeeStroops) {
+        const inclusion =
+          BigInt(gas.totalFeeChargedStroops) -
+          BigInt(gas.totalResourceFeeStroops);
+        gas.inclusionFeeStroops = inclusion.toString();
+      }
+    } catch (error) {
+      console.error('Error finalizing gas analytics:', error);
+    }
+  }
+
+  private scAddressToString(scAddress: any): string {
+    try {
+      return Address.fromScAddress(scAddress).toString();
+    } catch {
+      try {
+        return scAddress.toString();
+      } catch {
+        return 'unknown';
       }
     }
   }
 
-  private parseFromRPC(txData: any, trace: TransactionTrace): void {
-    // Similar to Horizon but with RPC-specific structure
-    const resultXdr = txData.resultXdr;
-    const metaXdr = txData.resultMetaXdr;
-
-    if (resultXdr) {
-      try {
-        const txResult = xdr.TransactionResult.fromXDR(resultXdr, 'base64');
-        if (txResult.result()?.results()) {
-          const opResults = txResult.result().results();
-          opResults.forEach((opResult: any, index: number) => {
-            const call = this.parseOperationResult(opResult, index);
-            if (call) {
-              trace.operations.push(call);
-            }
-          });
-        }
-      } catch (error) {
-        console.error('Error parsing result XDR:', error);
-        trace.errorMessage = `Failed to parse transaction result: ${error instanceof Error ? error.message : String(error)}`;
+  private executableWasmHash(executable: any): string | undefined {
+    try {
+      if (executable.switch().name === 'contractExecutableWasm') {
+        return executable.wasmHash().toString('hex');
       }
+    } catch {
+      /* not a wasm executable */
     }
-
-    if (metaXdr) {
-      try {
-        const txMeta = xdr.TransactionMeta.fromXDR(metaXdr, 'base64');
-        this.parseTransactionMeta(txMeta, trace);
-      } catch (error) {
-        console.error('Error parsing meta XDR:', error);
-        // Don't set error message here - partial parsing is okay
-        // We might have already extracted some useful info
-      }
-    }
+    return undefined;
   }
 
   private parseXDR(xdrString: string, trace: TransactionTrace): void {
@@ -179,12 +427,14 @@ export class SorobanParser {
           nestedCalls: [],
         };
 
-        // Parse return value
-        if (invokeResult && invokeResult.switch()?.name === 'success') {
-          const returnValue = invokeResult.success();
-          call.returnValue = this.decodeScVal(returnValue);
-        } else {
-          call.error = 'Operation failed';
+        // The success arm is `invokeHostFunctionSuccess`, and its payload is a
+        // SHA-256 hash of the return value, not the value itself - the decoded
+        // return value comes from the transaction meta (sorobanMeta.returnValue).
+        // Older code both checked for the wrong arm name (`success`) and tried
+        // to ScVal-decode the hash.
+        const armName = invokeResult?.switch()?.name;
+        if (armName && armName !== 'invokeHostFunctionSuccess' && armName !== 'success') {
+          call.error = `Operation failed: ${armName}`;
         }
 
         return call;
@@ -225,6 +475,8 @@ export class SorobanParser {
           if (diagnosticEvents.length > 0) {
             this.parseEvents(diagnosticEvents, trace);
           }
+
+          this.parseSorobanMetaFees(sorobanMeta, trace);
         }
         
         // Parse operations metadata if available
@@ -258,8 +510,10 @@ export class SorobanParser {
           if (returnValue && trace.operations.length > 0) {
             trace.operations[0].returnValue = this.decodeScVal(returnValue);
           }
+
+          this.parseSorobanMetaFees(sorobanMeta, trace);
         }
-        
+
         // Parse operations metadata
         const operations = v3Meta?.operations?.() || [];
         operations.forEach((op: any) => {
@@ -287,34 +541,74 @@ export class SorobanParser {
     }
   }
 
+  /**
+   * Extract the charged resource-fee breakdown from SorobanTransactionMeta
+   * ext v1 (present on Protocol 20+ Soroban transactions).
+   */
+  private parseSorobanMetaFees(sorobanMeta: any, trace: TransactionTrace): void {
+    try {
+      const ext = sorobanMeta.ext?.();
+      if (!ext || ext.switch() !== 1) return;
+      const v1 = ext.v1();
+      const gas: GasAnalytics = trace.gas || {};
+      gas.nonRefundableFeeStroops = bigIntString(
+        v1.totalNonRefundableResourceFeeCharged()
+      );
+      gas.refundableFeeStroops = bigIntString(
+        v1.totalRefundableResourceFeeCharged()
+      );
+      gas.rentFeeStroops = bigIntString(v1.rentFeeCharged());
+      trace.gas = gas;
+    } catch (error) {
+      console.error('Error parsing Soroban meta fees:', error);
+    }
+  }
+
   private parseEvents(events: any[], trace: TransactionTrace): void {
-    events.forEach((event: any) => {
+    events.forEach((raw: any) => {
       try {
+        // DiagnosticEvent wraps a ContractEvent in an `event` field.
+        const event =
+          raw && typeof raw.event === 'function' && typeof raw.body !== 'function'
+            ? raw.event()
+            : raw;
+
         const contractEvent: TraceEvent = {
           type: 'event',
           topics: [],
           data: null,
         };
 
-        // Extract contract ID if present
-        if (event.contractId) {
-          contractEvent.contractId = event.contractId().toString('hex');
-        }
-
-        // Parse topics
-        if (event.topics) {
-          const topics = event.topics();
-          contractEvent.topics = topics.map((topic: any) => this.decodeScVal(topic));
-        }
-
-        // Parse body/data
-        if (event.body) {
-          const body = event.body();
-          if (body.switch()?.name === 'v0') {
-            contractEvent.data = this.decodeScVal(body.v0()?.data());
+        // Contract ID (32-byte hash -> C... strkey).
+        try {
+          const cid = event.contractId?.();
+          if (cid) {
+            contractEvent.contractId = StrKey.encodeContract(cid);
           }
-        } else if (event.data) {
-          contractEvent.data = this.decodeScVal(event.data());
+        } catch {
+          /* optional */
+        }
+
+        // ContractEvent body is a numeric union whose only arm is v0.
+        let v0: any;
+        try {
+          v0 = event.body?.().v0?.();
+        } catch {
+          v0 = undefined;
+        }
+
+        if (v0) {
+          contractEvent.topics = (v0.topics?.() || []).map((t: any) =>
+            this.decodeScVal(t)
+          );
+          contractEvent.data = this.decodeScVal(v0.data?.());
+        } else if (typeof event.topics === 'function') {
+          contractEvent.topics = (event.topics() || []).map((t: any) =>
+            this.decodeScVal(t)
+          );
+          if (typeof event.data === 'function') {
+            contractEvent.data = this.decodeScVal(event.data());
+          }
         }
 
         trace.events.push(contractEvent);

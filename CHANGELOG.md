@@ -8,11 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- WASM metadata extraction for function names
-- Gas usage analytics
+- Resolve WASM metadata for any invoked contract (fetch spec by contract ID from RPC)
+- Full storage read/write extraction from operation meta
 - Enhanced error messages with context
-- Contract ABI integration
 - Performance optimizations
+
+## [0.2.0] - 2026-09-01
+
+### Added
+- **Transaction envelope decoding**: real contract IDs, invoked function names,
+  and decoded arguments now replace the previous generic `invoke()` placeholder
+- **Nested call tree**: sub-invocations are reconstructed from the transaction's
+  Soroban authorization entries
+- **Gas / resource analytics** (`RESOURCE USAGE` section): CPU instructions,
+  disk-read/write bytes, footprint entry counts, and a full fee breakdown
+  (resource fee, non-refundable, refundable, rent, inclusion fee, total charged),
+  also included under `gas` in `--json` output
+- **WASM metadata extraction**: for transactions that upload contract code, the
+  `contractspecv0` / `contractmetav0` / `contractenvmetav0` custom sections are
+  decoded into a function list (name, argument names/types, return type) and
+  build metadata (`rsver`, `rssdkver`, host interface version)
+- `extractWasmMetadata` and `scSpecTypeToString` exported from the package entry point
+- `scripts/generate-fixtures.js` to regenerate deterministic test fixtures
+
+### Changed
+- `SorobanTrace#traceFromFile` and `#traceFromData` are now `async` and return
+  `Promise<string>` (WASM decoding requires `WebAssembly.compile`)
+- Envelope, result, and meta XDR are now parsed additively instead of one being
+  chosen exclusively
+- `--json` output serializes `BigInt` values (i128/u64/…) as decimal strings
+  instead of throwing
+
+### Fixed
+- Operation success was never detected: the code checked for an
+  `invokeHostFunctionResult` arm named `success` (the real name is
+  `invokeHostFunctionSuccess`) and tried to ScVal-decode the return-value hash
+- Contract events from the meta XDR now decode their topics, data, and contract
+  ID (previously empty / raw hex); diagnostic events are unwrapped correctly
+- CI: commit `package-lock.json` (was git-ignored, breaking `npm ci` and
+  setup-node caching); bump retired GitHub Action versions
+  (`upload-artifact` v3→v4, `codeql-action` v2→v3, `dependency-review-action`
+  v3→v4, `codecov-action` v3→v5, `action-gh-release` v1→v2); replace EOL Node
+  21.x with 22.x in the test matrix
 
 ## [0.1.0] - 2025-10-07
 
@@ -120,6 +157,7 @@ soroban-trace tx <TX_HASH> --network testnet
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 0.2.0 | 2026-09-01 | Envelope decoding, gas analytics, WASM metadata |
 | 0.1.0 | 2025-10-07 | Initial release - Transaction tracing CLI tool |
 
 ---
@@ -143,7 +181,9 @@ None in v0.1.0 (initial release)
 See [docs/known-issues.md](docs/known-issues.md) for current limitations and workarounds.
 
 **Main Limitations:**
-- Function names show as generic "invoke()" - WASM metadata extraction not yet implemented
+- WASM spec is only resolved for transactions that upload contract code, not for
+  arbitrary invoked contract IDs (planned)
+- Storage read/write extraction from operation meta is still partial
 - Large transactions may be slow to parse
 - No live monitoring yet (planned for Phase 5)
 
@@ -181,6 +221,7 @@ Special thanks to the Stellar and Soroban communities!
 
 ---
 
-[Unreleased]: https://github.com/daveylupes/soroban-trace/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/daveylupes/soroban-trace/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/daveylupes/soroban-trace/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/daveylupes/soroban-trace/releases/tag/v0.1.0
 

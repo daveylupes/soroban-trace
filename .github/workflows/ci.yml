@@ -13,7 +13,7 @@ jobs:
     
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 21.x]
+        node-version: [18.x, 20.x, 22.x]
     
     steps:
     - name: Checkout code
@@ -36,8 +36,8 @@ jobs:
       run: npm run build
     
     - name: Run tests
-      run: npm test
-    
+      run: npm run test:coverage
+
     - name: Test CLI
       run: |
         npm link
@@ -46,9 +46,9 @@ jobs:
     
     - name: Upload coverage
       if: matrix.node-version == '20.x'
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
       with:
-        file: ./coverage/lcov.info
+        files: ./coverage/lcov.info
         fail_ci_if_error: false
       continue-on-error: true
 
@@ -81,7 +81,7 @@ jobs:
         test -f dist/types.js
     
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: dist
         path: dist/
