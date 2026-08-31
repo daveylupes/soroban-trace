@@ -304,7 +304,8 @@ export class SorobanParser {
       }
 
       const inner = txResult.result();
-      if (inner?.switch()?.name && inner.switch().name.startsWith('txFailed')) {
+      const resultName: string = inner?.switch()?.name || '';
+      if (/failed/i.test(resultName)) {
         trace.success = false;
       }
 
@@ -344,22 +345,27 @@ export class SorobanParser {
     const gas = trace.gas;
     if (!gas) return;
 
-    const nonRefundable = gas.nonRefundableFeeStroops
-      ? BigInt(gas.nonRefundableFeeStroops)
-      : undefined;
-    const refundable = gas.refundableFeeStroops
-      ? BigInt(gas.refundableFeeStroops)
-      : undefined;
-    if (nonRefundable !== undefined || refundable !== undefined) {
-      gas.totalResourceFeeStroops = (
-        (nonRefundable ?? 0n) + (refundable ?? 0n)
-      ).toString();
-    }
+    try {
+      const nonRefundable = gas.nonRefundableFeeStroops
+        ? BigInt(gas.nonRefundableFeeStroops)
+        : undefined;
+      const refundable = gas.refundableFeeStroops
+        ? BigInt(gas.refundableFeeStroops)
+        : undefined;
+      if (nonRefundable !== undefined || refundable !== undefined) {
+        gas.totalResourceFeeStroops = (
+          (nonRefundable ?? 0n) + (refundable ?? 0n)
+        ).toString();
+      }
 
-    if (gas.totalFeeChargedStroops && gas.totalResourceFeeStroops) {
-      const inclusion =
-        BigInt(gas.totalFeeChargedStroops) - BigInt(gas.totalResourceFeeStroops);
-      gas.inclusionFeeStroops = inclusion.toString();
+      if (gas.totalFeeChargedStroops && gas.totalResourceFeeStroops) {
+        const inclusion =
+          BigInt(gas.totalFeeChargedStroops) -
+          BigInt(gas.totalResourceFeeStroops);
+        gas.inclusionFeeStroops = inclusion.toString();
+      }
+    } catch (error) {
+      console.error('Error finalizing gas analytics:', error);
     }
   }
 
